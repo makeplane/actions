@@ -80,6 +80,15 @@ inputs:
     required: false
     default: "latest"
 
+  additional-assets:
+    description: "Additional assets to download"
+    required: false
+    default: ""
+  additional-assets-dir:
+    description: "Additional assets directory"
+    required: false
+    default: ""
+
 runs:
   using: "composite"
   steps:
@@ -156,6 +165,14 @@ runs:
 
     - name: Check out the repo
       uses: actions/checkout@v4
+
+    - name: Download Additional Assets
+      if: ${{ inputs.additional-assets != '' && inputs.additional-assets-dir != '' }}
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.additional-assets }}
+        path: ${{ inputs.additional-assets-dir }}
+
 
     - name: Build and Push Docker Image
       uses: docker/build-push-action@v5.1.0
