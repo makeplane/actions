@@ -72,6 +72,13 @@ A reusable GitHub Action for building and pushing Docker images to both DockerHu
 | `build-prerelease` | Mark as pre-release | No | `"false"` |
 | `release-version` | Release version | No | `"latest"` |
 
+#### Additional Assets Options
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `additional-assets` | Additional assets to include | No | `""` |
+| `additional-assets-dir` | Additional assets directory path | No | `""` |
+
+
 ### Tag Generation
 
 The action automatically generates Docker image tags based on the following rules:
