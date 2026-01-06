@@ -88,6 +88,10 @@ inputs:
     description: "Additional assets directory"
     required: false
     default: ""
+  copy-license:
+    description: "Copy License to context folder"
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -165,6 +169,12 @@ runs:
 
     - name: Check out the repo
       uses: actions/checkout@v4
+
+    - name: Copy License
+      if: ${{ inputs.copy-license == 'true' }}
+      shell: bash
+      run: |
+        cp LICENSE.txt ${{ inputs.build-context }}/LICENSE.txt
 
     - name: Download Additional Assets
       if: ${{ inputs.additional-assets != '' && inputs.additional-assets-dir != '' }}
