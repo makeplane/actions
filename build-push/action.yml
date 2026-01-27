@@ -7,7 +7,10 @@ inputs:
   dockerhub-token:
     description: "The Dockerhub Token"
     required: true
-
+  fips-docker-file-path:
+    description: "The FIPS Docker file path. When set, an additional image is built with this Dockerfile and pushed to Docker Hub (and optional private registry) with image name suffixed by -fips (e.g. image-name-fips)."
+    required: false
+    default: ""
   private-registry-push:
     description: "Flag to push to private registry"
     required: false
@@ -47,7 +50,7 @@ inputs:
     description: "The build arguments"
     required: false
     default: ""
-  
+
   # Buildx Options
   buildx-driver:
     description: "Buildx driver"
@@ -107,8 +110,10 @@ runs:
         BUILD_RELEASE: ${{ inputs.build-release }}
         IS_PRERELEASE: ${{ inputs.build-prerelease }}
         REL_VERSION: ${{ inputs.release-version }}
+        FIPS_DOCKER_FILE_PATH: ${{ inputs.fips-docker-file-path }}
       run: |
         FLAT_BRANCH_VERSION=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9.-]//g')
+        IMG_NAME_FIPS="${{ env.IMG_NAME }}-fips"
 
         if [ "${{ env.BUILD_RELEASE }}" == "true" ]; then
           semver_regex="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*)?$"
@@ -143,9 +148,36 @@ runs:
             TAG=${TAG},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${{ env.IMG_NAME }}:${FLAT_BRANCH_VERSION}
           fi
         fi
-        
+
         echo "DOCKER_TAGS=${TAG}" >> $GITHUB_ENV
-        
+
+        # When FIPS Dockerfile path is set, compute FIPS tags (image name suffixed with -fips)
+        if [ -n "${{ env.FIPS_DOCKER_FILE_PATH }}" ]; then
+          if [ "${{ env.BUILD_RELEASE }}" == "true" ]; then
+            TAG_FIPS=${{ env.IMG_OWNER }}/${IMG_NAME_FIPS}:${{ env.REL_VERSION }}
+            if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
+              TAG_FIPS=${TAG_FIPS},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${IMG_NAME_FIPS}:${{ env.REL_VERSION }}
+            fi
+            if [ "${{ env.IS_PRERELEASE }}" != "true" ]; then
+              TAG_FIPS=${TAG_FIPS},${{ env.IMG_OWNER }}/${IMG_NAME_FIPS}:stable
+              if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
+                TAG_FIPS=${TAG_FIPS},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${IMG_NAME_FIPS}:stable
+              fi
+            fi
+          elif [ "${{ env.TARGET_BRANCH }}" == "master" ]; then
+            TAG_FIPS=${{ env.IMG_OWNER }}/${IMG_NAME_FIPS}:latest
+            if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
+              TAG_FIPS=${TAG_FIPS},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${IMG_NAME_FIPS}:latest
+            fi
+          else
+            TAG_FIPS=${{ env.IMG_OWNER }}/${IMG_NAME_FIPS}:${FLAT_BRANCH_VERSION}
+            if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
+              TAG_FIPS=${TAG_FIPS},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${IMG_NAME_FIPS}:${FLAT_BRANCH_VERSION}
+            fi
+          fi
+          echo "DOCKER_TAGS_FIPS=${TAG_FIPS}" >> $GITHUB_ENV
+        fi
+
     - name: Login to Docker Hub
       uses: docker/login-action@v3
       with:
@@ -191,6 +223,21 @@ runs:
         file: ${{ inputs.dockerfile-path }}
         platforms: ${{ inputs.buildx-platforms }}
         tags: ${{ env.DOCKER_TAGS }}
+        push: true
+        build-args: ${{ inputs.build-args }}
+      env:
+        DOCKER_BUILDKIT: 1
+        DOCKER_USERNAME: ${{ inputs.dockerhub-username }}
+        DOCKER_PASSWORD: ${{ inputs.dockerhub-token }}
+
+    - name: Build and Push FIPS Docker Image
+      if: ${{ inputs.fips-docker-file-path != '' }}
+      uses: docker/build-push-action@v5.1.0
+      with:
+        context: ${{ inputs.build-context }}
+        file: ${{ inputs.fips-docker-file-path }}
+        platforms: ${{ inputs.buildx-platforms }}
+        tags: ${{ env.DOCKER_TAGS_FIPS }}
         push: true
         build-args: ${{ inputs.build-args }}
       env:
