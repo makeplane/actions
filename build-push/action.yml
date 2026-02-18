@@ -223,12 +223,16 @@ runs:
         file: ${{ inputs.dockerfile-path }}
         platforms: ${{ inputs.buildx-platforms }}
         tags: ${{ env.DOCKER_TAGS }}
+        cache-from: type=registry,ref=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}:buildcache
+        cache-to: type=registry,ref=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}:buildcache,mode=max
         push: true
         build-args: ${{ inputs.build-args }}
       env:
         DOCKER_BUILDKIT: 1
         DOCKER_USERNAME: ${{ inputs.dockerhub-username }}
         DOCKER_PASSWORD: ${{ inputs.dockerhub-token }}
+        IMG_OWNER: ${{ inputs.docker-image-owner }}
+        IMG_NAME: ${{ inputs.docker-image-name }}
 
     - name: Build and Push FIPS Docker Image
       if: ${{ inputs.fips-docker-file-path != '' }}
@@ -238,9 +242,13 @@ runs:
         file: ${{ inputs.fips-docker-file-path }}
         platforms: ${{ inputs.buildx-platforms }}
         tags: ${{ env.DOCKER_TAGS_FIPS }}
+        cache-from: type=registry,ref=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}-fips:buildcache
+        cache-to: type=registry,ref=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}-fips:buildcache,mode=max
         push: true
         build-args: ${{ inputs.build-args }}
       env:
         DOCKER_BUILDKIT: 1
         DOCKER_USERNAME: ${{ inputs.dockerhub-username }}
         DOCKER_PASSWORD: ${{ inputs.dockerhub-token }}
+        IMG_OWNER: ${{ inputs.docker-image-owner }}
+        IMG_NAME: ${{ inputs.docker-image-name }}
