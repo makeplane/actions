@@ -230,7 +230,7 @@ runs:
 
 
     - name: Build and Push Docker Image
-      uses: docker/build-push-action@v6.18.0
+      uses: docker/build-push-action@v7.0.0
       with:
         context: ${{ inputs.build-context }}
         file: ${{ inputs.dockerfile-path }}
@@ -252,7 +252,7 @@ runs:
 
     - name: Build and Push FIPS Docker Image
       if: ${{ inputs.fips-docker-file-path != '' }}
-      uses: docker/build-push-action@v6.18.0
+      uses: docker/build-push-action@v7.0.0
       with:
         context: ${{ inputs.build-context }}
         file: ${{ inputs.fips-docker-file-path }}
