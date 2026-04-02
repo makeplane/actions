@@ -14,7 +14,7 @@ A reusable GitHub Action for building and pushing Docker images to both DockerHu
 
 ```yaml
 - name: Build and Push Docker Image
-  uses: makeplane/actions/build-push@v1.0.0
+  uses: makeplane/actions/build-push@main
   with:
     # Required Parameters
     dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -29,7 +29,12 @@ A reusable GitHub Action for building and pushing Docker images to both DockerHu
     buildx-version: "latest"
     buildx-platforms: "linux/amd64"
     buildx-endpoint: "default"
+    secrets: ""
+    secret-envs: ""
+    secret-files: ""
 ```
+
+Use a published tag in production workflows. Examples in this README use `@main` so they match the unreleased inputs documented on the default branch.
 
 ### Inputs
 
@@ -56,6 +61,9 @@ A reusable GitHub Action for building and pushing Docker images to both DockerHu
 | `build-context` | Build context path | No | `"."` |
 | `dockerfile-path` | Path to Dockerfile | Yes | - |
 | `build-args` | Build arguments | No | `""` |
+| `secrets` | BuildKit inline secrets | No | `""` |
+| `secret-envs` | BuildKit environment-backed secrets | No | `""` |
+| `secret-files` | BuildKit file-backed secrets | No | `""` |
 
 #### Buildx Options
 | Input | Description | Required | Default |
@@ -103,7 +111,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Build and Push
-        uses: makeplane/actions/build-push@v1.0.0
+        uses: makeplane/actions/build-push@main
         with:
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -119,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Build and Push Release
-        uses: makeplane/actions/build-push@v1.0.0
+        uses: makeplane/actions/build-push@main
         with:
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -129,4 +137,26 @@ jobs:
           build-release: "true"
           release-version: "v1.0.0"
           buildx-platforms: "linux/amd64,linux/arm64"
+```
+
+#### BuildKit Secrets
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build with BuildKit secrets
+        uses: makeplane/actions/build-push@main
+        with:
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+          docker-image-owner: myorg
+          docker-image-name: myapp
+          dockerfile-path: ./Dockerfile
+          secret-envs: |
+            sentry_auth_token=SENTRY_AUTH_TOKEN
+          secret-files: |
+            npmrc=.npmrc
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 ```
