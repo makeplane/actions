@@ -81,6 +81,25 @@ inputs:
     required: true
     default: "default"
 
+  # Split-architecture (push-by-digest) options.
+  #
+  # These exist so one image can be built by several jobs in parallel -- one per
+  # architecture, each on a runner native to that architecture -- and merged
+  # afterwards by the merge-manifest action. Defaults reproduce the single-job,
+  # tagged-push behaviour exactly, so existing callers need no changes.
+  push-by-digest:
+    description: "Push an untagged manifest and return its digest instead of pushing tags. Requires exactly one platform in buildx-platforms; the merge-manifest action applies the tags afterwards."
+    required: false
+    default: "false"
+  cache-scope-suffix:
+    description: "Appended to the registry cache ref (<image>:buildcache<suffix>). Set this per-architecture when building one image from several jobs, otherwise the jobs overwrite each other's cache."
+    required: false
+    default: ""
+  digest-artifact-name:
+    description: "When set (with push-by-digest), the resulting digest is uploaded under this artifact name for the merge job to collect. Must be unique per image and architecture within a workflow run."
+    required: false
+    default: ""
+
   # Release Build Options
   build-release:
     description: "Flag to publish release"
@@ -108,10 +127,42 @@ inputs:
     required: false
     default: "false"
 
+outputs:
+  digest:
+    description: "Digest of the pushed manifest. Only set when push-by-digest is true."
+    value: ${{ steps.build_by_digest.outputs.digest }}
+  tags:
+    description: "Comma-separated tag list computed for this image. Pass this to merge-manifest so the merge cannot disagree with the build about tag policy."
+    value: ${{ steps.compute_tags.outputs.DOCKER_TAGS }}
+  image-ref:
+    description: "Bare <owner>/<name> repository reference, with no tag."
+    value: ${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}
+
 runs:
   using: "composite"
   steps:
+    # push-by-digest cannot express either of these, and both would fail in ways
+    # that are hard to read from a build log. Refuse up front instead.
+    - name: Validate digest-mode inputs
+      if: ${{ inputs.push-by-digest == 'true' }}
+      shell: bash
+      env:
+        BUILDX_PLATFORMS: ${{ inputs.buildx-platforms }}
+        FIPS_DOCKER_FILE_PATH: ${{ inputs.fips-docker-file-path }}
+      run: |
+        if [[ "$BUILDX_PLATFORMS" == *,* ]]; then
+          echo "push-by-digest builds exactly one platform per job, got: ${BUILDX_PLATFORMS}" >&2
+          echo "Give each architecture its own job and merge them with merge-manifest." >&2
+          exit 1
+        fi
+        if [ -n "$FIPS_DOCKER_FILE_PATH" ]; then
+          echo "push-by-digest does not support fips-docker-file-path." >&2
+          echo "That input builds a second image, which would need a second digest stream." >&2
+          exit 1
+        fi
+
     - name: Set Docker Tag
+      id: compute_tags
       shell: bash
       env:
         IMG_OWNER: ${{ inputs.docker-image-owner }}
@@ -124,72 +175,7 @@ runs:
         REL_VERSION: ${{ inputs.release-version }}
         FIPS_DOCKER_FILE_PATH: ${{ inputs.fips-docker-file-path }}
         TARGET_BRANCH: ${{ github.ref_name }}
-      run: |
-        FLAT_BRANCH_VERSION=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9.-]//g')
-        IMG_NAME_FIPS="${{ env.IMG_NAME }}-fips"
-
-        if [ "${{ env.BUILD_RELEASE }}" == "true" ]; then
-          semver_regex="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*)?$"
-          if [[ ! ${{ env.REL_VERSION }} =~ $semver_regex ]]; then
-            echo "Invalid Release Version Format : ${{ env.REL_VERSION }}"
-            echo "Please provide a valid SemVer version"
-            echo "e.g. v1.2.3 or v1.2.3-alpha-1"
-            echo "Exiting the build process"
-            exit 1  # Exit with status 1 to fail the step
-          fi
-
-          TAG=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}:${{ env.REL_VERSION }}
-
-          if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
-            TAG=${TAG},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${{ env.IMG_NAME }}:${{ env.REL_VERSION }}
-          fi
-
-          if [ "${{ env.IS_PRERELEASE }}" != "true" ]; then
-            TAG=${TAG},${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}:stable
-            if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
-              TAG=${TAG},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${{ env.IMG_NAME }}:stable
-            fi
-          fi
-        elif [ "${{ env.TARGET_BRANCH }}" == "master" ]; then
-          TAG=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}:latest
-          if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
-            TAG=${TAG},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${{ env.IMG_NAME }}:latest
-          fi
-        else
-          TAG=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}:${FLAT_BRANCH_VERSION}
-          if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
-            TAG=${TAG},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${{ env.IMG_NAME }}:${FLAT_BRANCH_VERSION}
-          fi
-        fi
-
-        echo "DOCKER_TAGS=${TAG}" >> $GITHUB_ENV
-
-        # When FIPS Dockerfile path is set, compute FIPS tags (image name suffixed with -fips)
-        if [ -n "${{ env.FIPS_DOCKER_FILE_PATH }}" ]; then
-          if [ "${{ env.BUILD_RELEASE }}" == "true" ]; then
-            TAG_FIPS=${{ env.IMG_OWNER }}/${IMG_NAME_FIPS}:${{ env.REL_VERSION }}
-            if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
-              TAG_FIPS=${TAG_FIPS},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${IMG_NAME_FIPS}:${{ env.REL_VERSION }}
-            fi
-            if [ "${{ env.IS_PRERELEASE }}" != "true" ]; then
-              TAG_FIPS=${TAG_FIPS},${{ env.IMG_OWNER }}/${IMG_NAME_FIPS}:stable
-              if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
-                TAG_FIPS=${TAG_FIPS},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${IMG_NAME_FIPS}:stable
-              fi
-            fi
-          elif [ "${{ env.TARGET_BRANCH }}" == "master" ]; then
-            TAG_FIPS=${{ env.IMG_OWNER }}/${IMG_NAME_FIPS}:latest
-            if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
-              TAG_FIPS=${TAG_FIPS},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${IMG_NAME_FIPS}:latest
-            fi
-          else
-            TAG_FIPS=${{ env.IMG_OWNER }}/${IMG_NAME_FIPS}:${FLAT_BRANCH_VERSION}
-            if [ "${{ env.PRIVATE_REGISTRY_PUSH }}" == "true" ]; then
-              TAG_FIPS=${TAG_FIPS},${{ env.PRIVATE_REGISTRY_ADDR }}/${{ env.PRIVATE_REGISTRY_PROJECT }}/${IMG_NAME_FIPS}:${FLAT_BRANCH_VERSION}
-            fi
-          fi
-          echo "DOCKER_TAGS_FIPS=${TAG_FIPS}" >> $GITHUB_ENV
-        fi
+      run: bash "${{ github.action_path }}/../scripts/compute-tags.sh"
 
     - name: Login to Docker Hub
       uses: docker/login-action@v4.0.0
@@ -218,8 +204,10 @@ runs:
     - name: Copy License
       if: ${{ inputs.copy-license == 'true' }}
       shell: bash
+      env:
+        BUILD_CONTEXT: ${{ inputs.build-context }}
       run: |
-        cp LICENSE.txt ${{ inputs.build-context }}/LICENSE.txt
+        cp LICENSE.txt "${BUILD_CONTEXT}/LICENSE.txt"
 
     - name: Download Additional Assets
       if: ${{ inputs.additional-assets != '' && inputs.additional-assets-dir != '' }}
@@ -228,16 +216,16 @@ runs:
         name: ${{ inputs.additional-assets }}
         path: ${{ inputs.additional-assets-dir }}
 
-
     - name: Build and Push Docker Image
+      if: ${{ inputs.push-by-digest != 'true' }}
       uses: docker/build-push-action@v7.0.0
       with:
         context: ${{ inputs.build-context }}
         file: ${{ inputs.dockerfile-path }}
         platforms: ${{ inputs.buildx-platforms }}
         tags: ${{ env.DOCKER_TAGS }}
-        cache-from: type=registry,ref=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}:buildcache
-        cache-to: type=registry,ref=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}:buildcache,mode=max
+        cache-from: type=registry,ref=${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}:buildcache${{ inputs.cache-scope-suffix }}
+        cache-to: type=registry,ref=${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}:buildcache${{ inputs.cache-scope-suffix }},mode=max
         push: true
         build-args: ${{ inputs.build-args }}
         secrets: ${{ inputs.secrets }}
@@ -247,8 +235,58 @@ runs:
         DOCKER_BUILDKIT: 1
         DOCKER_USERNAME: ${{ inputs.dockerhub-username }}
         DOCKER_PASSWORD: ${{ inputs.dockerhub-token }}
-        IMG_OWNER: ${{ inputs.docker-image-owner }}
-        IMG_NAME: ${{ inputs.docker-image-name }}
+
+    # Digest mode. No tag is written here at all: the image exporter pushes the
+    # manifest and the registry hands back its digest, which merge-manifest
+    # later collects alongside the other architectures' digests. provenance is
+    # pinned off so each job pushes a plain manifest rather than an index.
+    - name: Build and Push Docker Image by Digest
+      id: build_by_digest
+      if: ${{ inputs.push-by-digest == 'true' }}
+      uses: docker/build-push-action@v7.0.0
+      with:
+        context: ${{ inputs.build-context }}
+        file: ${{ inputs.dockerfile-path }}
+        platforms: ${{ inputs.buildx-platforms }}
+        outputs: type=image,name=${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }},push-by-digest=true,name-canonical=true,push=true
+        cache-from: type=registry,ref=${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}:buildcache${{ inputs.cache-scope-suffix }}
+        cache-to: type=registry,ref=${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}:buildcache${{ inputs.cache-scope-suffix }},mode=max
+        provenance: false
+        push: false
+        build-args: ${{ inputs.build-args }}
+        secrets: ${{ inputs.secrets }}
+        secret-envs: ${{ inputs.secret-envs }}
+        secret-files: ${{ inputs.secret-files }}
+      env:
+        DOCKER_BUILDKIT: 1
+        DOCKER_USERNAME: ${{ inputs.dockerhub-username }}
+        DOCKER_PASSWORD: ${{ inputs.dockerhub-token }}
+
+    # The digest travels to the merge job as an artifact rather than a job
+    # output: every leg of a matrix writes the same job-output key, so only the
+    # last leg to finish would survive and the merge would quietly produce a
+    # single-platform manifest.
+    - name: Export digest
+      if: ${{ inputs.push-by-digest == 'true' && inputs.digest-artifact-name != '' }}
+      shell: bash
+      env:
+        DIGEST: ${{ steps.build_by_digest.outputs.digest }}
+      run: |
+        if [ -z "$DIGEST" ]; then
+          echo "Build produced no digest; refusing to upload an empty artifact." >&2
+          exit 1
+        fi
+        mkdir -p "${RUNNER_TEMP}/digests"
+        touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+    - name: Upload digest
+      if: ${{ inputs.push-by-digest == 'true' && inputs.digest-artifact-name != '' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.digest-artifact-name }}
+        path: ${{ runner.temp }}/digests/*
+        retention-days: 1
+        if-no-files-found: error
 
     - name: Build and Push FIPS Docker Image
       if: ${{ inputs.fips-docker-file-path != '' }}
@@ -258,8 +296,8 @@ runs:
         file: ${{ inputs.fips-docker-file-path }}
         platforms: ${{ inputs.buildx-platforms }}
         tags: ${{ env.DOCKER_TAGS_FIPS }}
-        cache-from: type=registry,ref=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}-fips:buildcache
-        cache-to: type=registry,ref=${{ env.IMG_OWNER }}/${{ env.IMG_NAME }}-fips:buildcache,mode=max
+        cache-from: type=registry,ref=${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}-fips:buildcache${{ inputs.cache-scope-suffix }}
+        cache-to: type=registry,ref=${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}-fips:buildcache${{ inputs.cache-scope-suffix }},mode=max
         push: true
         build-args: ${{ inputs.build-args }}
         secrets: ${{ inputs.secrets }}
@@ -269,5 +307,3 @@ runs:
         DOCKER_BUILDKIT: 1
         DOCKER_USERNAME: ${{ inputs.dockerhub-username }}
         DOCKER_PASSWORD: ${{ inputs.dockerhub-token }}
-        IMG_OWNER: ${{ inputs.docker-image-owner }}
-        IMG_NAME: ${{ inputs.docker-image-name }}

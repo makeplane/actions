@@ -1,0 +1,164 @@
+name: "Merge Multi-Arch Manifest"
+description: "Collects per-architecture digests pushed by build-push (push-by-digest mode) and publishes them as a single tagged multi-arch manifest"
+inputs:
+  dockerhub-username:
+    description: "The Dockerhub username"
+    required: true
+  dockerhub-token:
+    description: "The Dockerhub Token"
+    required: true
+
+  private-registry-push:
+    description: "Not supported yet in digest mode -- a digest is only addressable within the repository it was pushed to, so the per-architecture builds would have to push to the private registry as well."
+    required: false
+    default: "false"
+  private-registry-addr:
+    description: "The private registry addresss"
+    required: false
+    default: "registry.plane.tools"
+  private-registry-project:
+    description: "The private registry project"
+    default: "plane"
+    required: false
+
+  docker-image-owner:
+    description: "The owner of the Docker image"
+    required: true
+  docker-image-name:
+    description: "The name of the Docker image"
+    required: true
+
+  digest-artifact-pattern:
+    description: "Artifact name pattern holding the per-architecture digests, e.g. digest-web-*"
+    required: true
+  expected-platforms:
+    description: "Comma-separated platforms the merged manifest must advertise, e.g. linux/amd64,linux/arm64. Verified after the merge; leave empty to skip the check."
+    required: false
+    default: ""
+
+  # Release Build Options -- must match what build-push was given, so the merge
+  # applies exactly the tags the build would have applied.
+  build-release:
+    description: "Flag to publish release"
+    required: false
+    default: "false"
+  build-prerelease:
+    description: "Flag to publish prerelease"
+    required: false
+    default: "false"
+  release-version:
+    description: "The release version"
+    required: false
+    default: "latest"
+
+outputs:
+  tags:
+    description: "Comma-separated tag list applied to the merged manifest."
+    value: ${{ steps.compute_tags.outputs.DOCKER_TAGS }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate inputs
+      if: ${{ inputs.private-registry-push == 'true' }}
+      shell: bash
+      run: |
+        echo "private-registry-push is not supported by merge-manifest." >&2
+        echo "A digest is only addressable as <repo>@sha256:..., so merging into" >&2
+        echo "the private registry requires the per-architecture builds to have" >&2
+        echo "pushed by digest into that registry too." >&2
+        exit 1
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v4.0.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-token }}
+
+    - name: Download digests
+      uses: actions/download-artifact@v8
+      with:
+        pattern: ${{ inputs.digest-artifact-pattern }}
+        merge-multiple: true
+        path: ${{ runner.temp }}/digests
+
+    - name: Set Docker Tag
+      id: compute_tags
+      shell: bash
+      env:
+        IMG_OWNER: ${{ inputs.docker-image-owner }}
+        IMG_NAME: ${{ inputs.docker-image-name }}
+        PRIVATE_REGISTRY_PUSH: ${{ inputs.private-registry-push }}
+        PRIVATE_REGISTRY_ADDR: ${{ inputs.private-registry-addr }}
+        PRIVATE_REGISTRY_PROJECT: ${{ inputs.private-registry-project }}
+        BUILD_RELEASE: ${{ inputs.build-release }}
+        IS_PRERELEASE: ${{ inputs.build-prerelease }}
+        REL_VERSION: ${{ inputs.release-version }}
+        TARGET_BRANCH: ${{ github.ref_name }}
+      run: bash "${{ github.action_path }}/../scripts/compute-tags.sh"
+
+    - name: Create manifest list
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}
+      run: |
+        cd "${RUNNER_TEMP}/digests"
+
+        # Each file is named after the digest it carries, minus the sha256: prefix.
+        sources=()
+        for f in *; do
+          [ -e "$f" ] || continue
+          sources+=("${IMAGE_REF}@sha256:${f}")
+        done
+
+        if [ ${#sources[@]} -eq 0 ]; then
+          echo "No digests found for ${IMAGE_REF}." >&2
+          echo "Did the build jobs run with push-by-digest and a digest-artifact-name?" >&2
+          exit 1
+        fi
+
+        tag_args=()
+        IFS=',' read -r -a tags <<<"$DOCKER_TAGS"
+        for t in "${tags[@]}"; do
+          tag_args+=(-t "$t")
+        done
+
+        echo "Merging ${#sources[@]} digest(s) into ${#tags[@]} tag(s):"
+        printf '  source: %s\n' "${sources[@]}"
+        printf '  tag:    %s\n' "${tags[@]}"
+
+        docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+
+        echo "FIRST_TAG=${tags[0]}" >>"$GITHUB_ENV"
+
+    # A merge that produced a single-platform index still exits 0, so assert the
+    # platform set rather than trusting the exit code.
+    - name: Verify merged manifest
+      shell: bash
+      env:
+        EXPECTED_PLATFORMS: ${{ inputs.expected-platforms }}
+      run: |
+        inspected=$(docker buildx imagetools inspect "$FIRST_TAG")
+        echo "$inspected"
+
+        if [ -z "$EXPECTED_PLATFORMS" ]; then
+          exit 0
+        fi
+
+        # Match the rendered "Platform:  linux/arm64" lines rather than the raw
+        # JSON: checking os and architecture separately would pass an index that
+        # happens to contain both strings in different entries.
+        missing=0
+        IFS=',' read -r -a expected <<<"$EXPECTED_PLATFORMS"
+        for p in "${expected[@]}"; do
+          if ! grep -Eq "^[[:space:]]*Platform:[[:space:]]+${p}[[:space:]]*$" <<<"$inspected"; then
+            echo "Merged manifest ${FIRST_TAG} is missing platform ${p}" >&2
+            missing=1
+          fi
+        done
+
+        if [ "$missing" -ne 0 ]; then
+          exit 1
+        fi
+
+        echo "Verified ${FIRST_TAG} advertises: ${EXPECTED_PLATFORMS}"

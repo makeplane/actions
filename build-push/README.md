@@ -86,6 +86,20 @@ Use a published tag in production workflows. Examples in this README use `@main`
 | `additional-assets` | Additional assets to include | No | `""` |
 | `additional-assets-dir` | Additional assets directory path | No | `""` |
 
+#### Split-Architecture Options
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `push-by-digest` | Push an untagged manifest and return its digest instead of tags | No | `"false"` |
+| `cache-scope-suffix` | Appended to the registry cache ref (`<image>:buildcache<suffix>`) | No | `""` |
+| `digest-artifact-name` | Artifact name to upload the resulting digest under | No | `""` |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `digest` | Digest of the pushed manifest. Only set when `push-by-digest` is `true`. |
+| `tags` | Comma-separated tag list computed for this image. |
+| `image-ref` | Bare `<owner>/<name>` repository reference, with no tag. |
 
 ### Tag Generation
 
@@ -160,3 +174,63 @@ jobs:
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 ```
+
+#### Split-Architecture Build (native runners, no emulation)
+
+Build each architecture on a runner native to it, then merge the results into one
+multi-arch manifest with [`merge-manifest`](../merge-manifest). This avoids QEMU
+emulation and removes any dependency on a remote builder.
+
+```yaml
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: blacksmith-4vcpu-ubuntu-2404
+          - arch: arm64
+            platform: linux/arm64
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: makeplane/actions/build-push@main
+        with:
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+          docker-image-owner: myorg
+          docker-image-name: myapp
+          dockerfile-path: ./Dockerfile
+          buildx-platforms: ${{ matrix.platform }}
+          push-by-digest: "true"
+          cache-scope-suffix: -${{ matrix.arch }}
+          digest-artifact-name: digest-myapp-${{ matrix.arch }}
+
+  merge:
+    needs: [build]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: makeplane/actions/merge-manifest@main
+        with:
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+          docker-image-owner: myorg
+          docker-image-name: myapp
+          digest-artifact-pattern: digest-myapp-*
+          expected-platforms: linux/amd64,linux/arm64
+```
+
+Three things matter here and are easy to get wrong:
+
+- **`cache-scope-suffix` is not optional in practice.** The registry cache manifest
+  is not platform-indexed, so two legs writing the same `:buildcache` ref overwrite
+  each other and roughly half of all legs go cold every run.
+- **`digest-artifact-name` must be unique per image *and* architecture.** Digests
+  travel as artifacts rather than job outputs because every matrix leg writes the
+  same job-output key — only the last leg to finish would survive, silently
+  producing a single-platform manifest.
+- **One platform per job.** `push-by-digest` rejects a comma-separated
+  `buildx-platforms`, and is incompatible with `fips-docker-file-path` (that input
+  builds a second image, which would need a second digest stream).
